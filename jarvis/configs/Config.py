@@ -48,12 +48,7 @@ MI_ASK_SIMULATE_DATA = {
 }
 start_conversation="开始"
 end_conversation="结束"
-MI_USER="18086490898"
-MI_PASS="WCVwcy2631839"
-MI_DID="543223774"
 
-bot="siliconflow"
-siliconflow_key="sk-nhbrbdozyxoefyinomcphnyuxtubnitnozpfxhcxfysioslw"
 mute_xiaoai = True
 stream = True
 use_command = True
