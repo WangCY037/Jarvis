@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 from typing import List, Dict, Optional
 from pathlib import Path
 import aiohttp
+import json
 
-from jarvis.memory.memory import Memory, BotType
-from jarvis.planning.planner import Planner
+from jarvis.memory.memory import Memory, BotType, MessageType, MemorySummarizer
+from jarvis.planning.planner import DialogueState, PlanType, Planner
 from jarvis.action.executor import ActionExecutor
 from xiaogpt.xiaogpt import MiGPT
 from xiaogpt.bot.siliconflow_bot import SiliconFlowBot
+from xiaogpt.bot.glm_bot import GLMBot
 from jarvis.configs.Config import Config
 
 @dataclasses.dataclass
@@ -26,100 +29,93 @@ class JarvisAgent:
     executor: ActionExecutor = None
     client_session: Optional[aiohttp.ClientSession] = None
     bot: Optional[SiliconFlowBot] = None
+    search_bot: Optional[GLMBot] = None
+    logger: logging.Logger = dataclasses.field(default_factory=lambda: logging.getLogger('JarvisAgent'))
     
     # 运行时状态
     is_active: bool = True
     in_conversation: bool = False
-    current_context: Dict = dataclasses.field(default_factory=dict)
     
     def __post_init__(self):
         """初始化各个模块"""
-        self.memory = Memory()
-        self.planner = Planner(self.memory)
-        self.executor = ActionExecutor()
+        if self.config:
+            self.memory = Memory(config=self.config)
+            # 移除 planner 的初始化，因为它需要在 migpt 初始化后进行
+            self.executor = None
         
     async def init_bot(self):
         """初始化对话机器人"""
         if not self.config:
             raise RuntimeError("Config not initialized")
-            
+        
+        # 先创建 client_session 如果还没有的话
+        if not self.client_session:
+            self.client_session = aiohttp.ClientSession()
+        
+        # 初始化 Memory 如果还没有的话
+        if not self.memory:
+            self.memory = Memory(config=self.config)
+        
+        # 初始化机器人
         self.bot = SiliconFlowBot(
             api_key=self.config.siliconflow_key,
             proxy=self.config.proxy,
-            memory=self.memory
+            memory=self.memory,
+            logger=self.logger.getChild('SiliconFlow')
         )
         
-    async def process_input(self, input_text: str, source: str = "voice") -> str:
+        self.search_bot = GLMBot(
+            glm_key=self.config.glm_key, 
+            memory=self.memory, 
+            logger=self.logger.getChild('GLM')
+        )
+        
+        # 初始化 MemorySummarizer
+        self.memory.summarizer = MemorySummarizer(self.bot)
+        
+        # 初始化 MIGPT - 移到 planner 初始化之前
+        self.migpt = MiGPT(
+            self.config, 
+            client_session=self.client_session,
+            bot=self.bot,
+            search_bot=self.search_bot
+        )
+        await self.migpt.init_all_data()
+        
+        # 初始化 planner - 移到 MIGPT 初始化之后
+        self.planner = Planner(
+            bot=self.bot,
+            logger=self.logger.getChild('Planner')
+        )
+        
+        # 初始化 executor 
+        self.executor = ActionExecutor(self.bot, self.migpt, self.search_bot, logger=self.logger.getChild('ActionExecutor'))
+        
+    async def process_input(self, input_text: str, xiaoai_response: str):
         """处理输入并返回响应"""
-        # 1. 更新上下文
-        self.current_context.update({
-            "input": input_text,
-            "source": source,
-            "timestamp": asyncio.get_event_loop().time()
-        })
+        if not self.migpt or not self.migpt.last_record:
+            self.logger.error("MIGPT or last_record not initialized")
+            return
         
-        # # 2. 规划处理步骤
-        # plan = await self.planner.create_plan(input_text, self.current_context)
+        # 1. 使用Planner分析意图并创建计划
+        plan = await self.planner.create_plan(input_text, xiaoai_response)
         
-        # # 3. 执行计划
-        # response = await self.executor.execute_plan(plan)
+        # 2. 设置对话状态
+        self.in_conversation = (plan.analysis.dialogue_state == DialogueState.CONTINUOUS)
         
-        plan = None
-        response = input_text
-        # 4. 记录小爱的回答
-        if source == "voice" and self.migpt:
-            try:
-                xiaoai_response = self.migpt.last_record.get_nowait().get("answers", [])[0].get("tts", {}).get("text", "")
-                await self.memory.add_conversation(
-                    BotType.XIAOAI,
-                    input_text,
-                    xiaoai_response,
-                    self.current_context
-                )
-            except asyncio.QueueEmpty:
-                pass
+        # 3. 使用executor执行计划
+        await self.executor.execute_plan(plan)
         
-        # 5. 记录GPT/Silicon的回答
-        await self.memory.add_conversation(
-            BotType.SILICON if self.migpt else BotType.GPT,
-            input_text,
-            response,
-            self.current_context,
-            {"plan": plan.to_dict() if plan else None}
-        )
-        
-        # 6. 通过MIGPT输出响应
-        if self.migpt:
-            await self.migpt.speak(self.migpt.ask_gpt(response))
-                
-        return response
-    
-    async def handle_device_event(self, event: Dict):
-        """处理设备事件"""
-        plan = await self.planner.create_plan_for_event(event)
-        if plan:
-            await self.executor.execute_plan(plan)
-            
-    def update_config(self, config: Dict):
-        """更新配置"""
-        # TODO: 实现配置更新逻辑
-        pass
+        return 
         
     @classmethod
     async def create(cls, config: Config) -> JarvisAgent:
         """工厂方法创建agent实例"""
-        # 创建 client_session
-        client_session = aiohttp.ClientSession()
-        agent = cls(config=config, client_session=client_session)
+        agent = cls(config=config)
         
-        # 初始化bot
+        # 初始化所有组件
         await agent.init_bot()
         
-        if agent.config:
-            # 传递 client_session 和 bot 给 MiGPT
-            agent.migpt = MiGPT(agent.config, client_session=client_session, bot=agent.bot)
-            await agent.migpt.init_all_data()  # 初始化MIGPT
-            
         return agent
 
     async def run_forever(self):
@@ -131,26 +127,33 @@ class JarvisAgent:
         migpt_task = asyncio.create_task(self.migpt.poll_latest_ask())
         
         try:
-            print(f"Jarvis is running with MIGPT, start conversation")
+            self.logger.info("Jarvis is running with MIGPT, start conversation")
             while True:
                 # 从MIGPT获取用户输入
                 self.migpt.polling_event.set()
                 new_record = await self.migpt.last_record.get()
                 self.migpt.polling_event.clear()
-                
                 query = new_record.get("query", "").strip()
+                try: 
+                    answers = new_record.get("answers", [])
+                    xiaoai_response = answers[0].get("tts", {}).get("text", "") if answers else ""
+                    self.logger.info(f"query: {query} \n 小爱音箱的回答: {xiaoai_response}")
+                except IndexError:
+                    self.logger.warning("没有收到小爱音箱的回答")
+                    xiaoai_response = ""
+                    continue
                 
                 # 处理用户输入
-                await self.process_input(query)
+                await self.process_input(query, xiaoai_response)
                 
                 # 如果在对话模式,继续等待用户输入
                 if self.in_conversation:
                     await self.migpt.wakeup_xiaoai()
                     
         except asyncio.CancelledError:
-            print("Agent任务被取消")
+            self.logger.info("Agent任务被取消")
         except Exception as e:
-            print(f"Agent运行时发生错误: {str(e)}")
+            self.logger.error(f"Agent运行时发生错误: {str(e)}", exc_info=True)
         finally:
             migpt_task.cancel()
             await self.migpt.close()
@@ -161,13 +164,14 @@ class JarvisAgent:
         入口函数,用于启动Agent
         """
         agent = None
+        logger = logging.getLogger('JarvisAgent')
         try:
             # 创建并初始化agent
             agent = await cls.create(config)
             # 运行agent
             await agent.run_forever()
         except Exception as e:
-            print(f"Agent运行时发生错误: {str(e)}")
+            logger.error(f"Agent运行时发生错误: {str(e)}", exc_info=True)
             raise
         finally:
             if agent:
@@ -176,10 +180,6 @@ class JarvisAgent:
     async def shutdown(self):
         """安全关闭Agent的所有组件"""
         self.is_active = False
-        
-        # 更新长期记忆
-        if self.memory:
-            await self.memory.update_long_term()
         
         # 关闭 ClientSession
         if self.client_session and not self.client_session.closed:

@@ -9,7 +9,7 @@ import httpx
 from rich import print
 
 from xiaogpt.bot.base_bot import BaseBot, ChatHistoryMixin
-from xiaogpt.config import Config
+from jarvis.configs.Config import Config
 from xiaogpt.utils import split_sentences
 
 

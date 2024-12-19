@@ -2,7 +2,7 @@ from typing import AsyncIterator
 
 from miservice import MiIOService, MiNAService, miio_command
 
-from xiaogpt.config import Config
+from jarvis.configs.Config import Config
 from xiaogpt.tts.base import TTS
 from xiaogpt.utils import calculate_tts_elapse
 

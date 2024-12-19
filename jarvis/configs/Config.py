@@ -37,6 +37,17 @@ HARDWARE_COMMAND_DICT = {
 
 DEFAULT_COMMAND = ("5-1", "5-5")
 
+MI_USER="18086490898"
+MI_PASS="wcywcy2631839"
+MI_DID="543223774"
+
+bot="siliconflow"
+siliconflow_key="sk-nhbrbdozyxoefyinomcphnyuxtubnitnozpfxhcxfysioslw"
+CHATGLM_KEY="abf3d1bb433cd8da8bbc06cd14867686.lB5bIsMCn7dZ1A7B"
+
+# 打印所有日志
+verbose=1
+
 KEY_WORD = ("帮我", "请")
 CHANGE_PROMPT_KEY_WORD = ("更改提示词",)
 PROMPT = "以下请用300字以内回答，请只回答文字不要带链接"
@@ -63,7 +74,7 @@ class Config:
     moonshot_api_key: str = os.getenv("MOONSHOT_API_KEY", "")
     yi_api_key: str = os.getenv("YI_API_KEY", "")
     llama_api_key: str = os.getenv("GROQ_API_KEY", "")  # use groq
-    glm_key: str = os.getenv("CHATGLM_KEY", "")
+    glm_key: str = os.getenv("CHATGLM_KEY", "") if os.getenv("CHATGLM_KEY") else CHATGLM_KEY
     gemini_key: str = os.getenv("GEMINI_KEY", "")  # keep the old rule
     qwen_key: str = os.getenv("DASHSCOPE_API_KEY", "")  # keep the old rule
     serpapi_api_key: str = os.getenv("SERPAPI_API_KEY", "")
@@ -83,7 +94,7 @@ class Config:
     api_base: str | None = None
     deployment_id: str | None = None
     use_command: bool = use_command
-    verbose: int = 0
+    verbose: int = verbose
     start_conversation: str = start_conversation
     end_conversation: str = end_conversation
     stream: bool = stream
@@ -92,6 +103,8 @@ class Config:
     ] = "mi"
     tts_options: dict[str, Any] = field(default_factory=dict)
     gpt_options: dict[str, Any] = field(default_factory=dict)
+    memory_dir: str = "jarvis/memory"
+    max_short_term: int = 10
 
     def __post_init__(self) -> None:
         if self.proxy:

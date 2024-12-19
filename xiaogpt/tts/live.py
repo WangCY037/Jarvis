@@ -10,7 +10,7 @@ from typing import AsyncIterator
 
 from miservice import MiNAService
 
-from xiaogpt.config import Config
+from jarvis.configs.Config import Config
 from xiaogpt.tts.base import TTS, logger
 from xiaogpt.utils import get_hostname
 

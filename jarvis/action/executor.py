@@ -1,126 +1,153 @@
 from __future__ import annotations
 
 import json
-import aiohttp
-from typing import Dict, Optional
-from datetime import datetime
+import logging
+from pathlib import Path
+import time
+from typing import Optional
+from jarvis.memory.memory import BotType, MessageType
+from jarvis.planning.planner import ActionPlan
 from xiaogpt.xiaogpt import MiGPT
+from miservice import miio_command
+from xiaogpt.bot.glm_bot import GLMBot
+import asyncio
 
 class ActionExecutor:
-    """动作执行模块"""
+    """动作执行器 - 负责执行设备控制、信息查询等具体动作"""
     
-    # API端点配置
-    API_ENDPOINTS = {
-        "weather_api": "https://api.weather.com/v1/current",
-        "news_api": "https://api.news.com/v1/top",
-        "stock_api": "https://api.stock.com/v1/quote",
-        "traffic_api": "https://api.traffic.com/v1/status",
-        "calendar_api": "https://api.calendar.com/v1/events"
-    }
-    
-    def __init__(self):
-        self.migpt = None  # MiGPT实例
-        self.session = None
-        self.api_keys = {}  # 存储API密钥
-        
-    async def init(self):
-        """初始化"""
-        self.session = aiohttp.ClientSession()
-        
-    async def close(self):
-        """关闭执行器并清理资源"""
-        pass
-        
-    def set_migpt(self, migpt: MiGPT):
-        """设置MiGPT实例"""
+    def __init__(self, bot, migpt: MiGPT, search_bot, logger=None, config_path: str = None):
+        self.logger = logger or logging.getLogger('ActionExecutor')
+        self.bot = bot
         self.migpt = migpt
+        self.search_bot = search_bot
+        self._load_configs(config_path)
+
+        # 设备动作分析的prompt
+        self.device_action_prompt = """作为智能家居助手，请分析用户需求并给出具体的设备控制指令。
+
+用户输入：{user_input}
+可用设备：
+{available_devices}
+
+请直接返回可以发送给智能音箱的自然语言控制指令。例如：
+- "打开客厅的灯"
+- "把卧室空调温度调到26度"
+- "关闭所有设备"
+如果没有设备能满足用户的需求或者让用户体验更好，请满足用户的情绪价值，体察用户的情绪，回复的内容可以温柔、幽默、有趣，让用户感到开心。
+"""
+
+        # 信息查询的prompt
+        self.info_query_prompt = """作为AI助手，请基于查询结果生成回复。
+
+用户原始输入: {user_input}
+查询结果: {query_result}
+
+请以JSON格式返回：
+{
+    "response_text": "基于查询结果的回复文本"
+}"""
         
-    def set_api_key(self, api_name: str, key: str):
-        """设置API密钥"""
-        self.api_keys[api_name] = key
-        
-    async def execute_plan(self, plan) -> str:
-        """执行计划"""
-        response = []
-        
+    def _load_configs(self, config_path: Optional[str] = None):
+        """加载设备和控制配置"""
+        # 加载设备配置
+        config_path = Path(__file__).parent.parent / "configs"
         try:
-            for step in plan.steps:
-                if step["type"] == "api_call":
-                    if api_response := await self._call_api(step["api"]):
-                        response.append(api_response)
-                elif step["type"] == "device_control":
-                    await self._control_device(step["action"])
-                    response.append(
-                        f"已{step['action']['command']}{step['action']['device']}"
-                    )
+            with open(config_path / "devices.json") as f:
+                self.available_devices = json.load(f)
         except Exception as e:
-            response.append(f"执行出错: {str(e)}")
-            
-        return "，".join(response) if response else "执行完成"
-        
-    async def _call_api(self, api_name: str) -> Optional[str]:
-        """调用外部API"""
-        if not self.session:
-            await self.init()
-            
-        if api_name not in self.API_ENDPOINTS:
-            return None
-            
-        endpoint = self.API_ENDPOINTS[api_name]
-        headers = {}
-        if api_key := self.api_keys.get(api_name):
-            headers["Authorization"] = f"Bearer {api_key}"
-            
+            self.logger.error(f"加载设备列表失败: {str(e)}")
+            self.available_devices = []
+     
+    async def execute_device_actions(self, actions: str) -> str:
+        """执行设备控制动作"""
         try:
-            async with self.session.get(endpoint, headers=headers) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return self._format_api_response(api_name, data)
+            await miio_command(
+                self.migpt.miio_service,
+                self.migpt.config.mi_did,
+                f"5-4 {actions} #0")
         except Exception as e:
-            print(f"API调用出错 {api_name}: {str(e)}")
-        return None
-        
-    def _format_api_response(self, api_name: str, data: Dict) -> str:
-        """格式化API响应"""
-        if api_name == "weather_api":
-            return f"当前天气: {data.get('weather')}, 温度: {data.get('temperature')}°C"
-        elif api_name == "news_api":
-            return f"热门新闻: {', '.join(n['title'] for n in data.get('news', [])[:3])}"
-        elif api_name == "stock_api":
-            return f"股票信息: {data.get('symbol')} {data.get('price')}"
-        elif api_name == "traffic_api":
-            return f"交通状况: {data.get('status')}"
-        elif api_name == "calendar_api":
-            events = data.get("events", [])
-            return f"今日日程: {', '.join(e['title'] for e in events)}"
-        return str(data)
-        
-    async def _control_device(self, action: Dict):
-        """控制智能设备"""
-        if not self.migpt:
-            raise Exception("MiGPT未初始化")
+            self.logger.error(f"执行设备控制动作失败: {str(e)}")
+            return "抱歉，执行设备控制动作失败"
+
+    async def execute_info_query(self, search_query: str, query_result: str = None) -> str:
+        """执行信息查询"""
+        try:
+            # 直接使用整理好的搜索请求
+            search_result = await self.migpt.ask_gpt(search_query, 
+                                                    {
+                                                        "message_type": MessageType.SEARCH_INFO, 
+                                                        "stream": True
+                                                    })
+            return search_result
+        except Exception as e:
+            self.logger.error(f"执行信息查询失败: {str(e)}")
+            return "抱歉，信息查询失败"
+
+    async def analyze_device_actions(self, user_input: str) -> str:
+        """分析用户输入，生成具体的设备控制指令"""
+        try:
+            prompt = self.device_action_prompt.format(
+                user_input=user_input,
+                available_devices="\n".join([f"- {dev['name']}: {dev.get('description', '')}" for dev in self.available_devices])
+            )
+            response = await self.bot.ask(prompt, message_type=MessageType.DEVICE_CONTROL)
+            return response  # 直接返回文本指令
+        except Exception as e:
+            self.logger.error(f"分析设备动作失败: {str(e)}")
+            return ""
+
+    async def execute_plan(self, plan: ActionPlan):
+        """执行行动计划并返回最终响应"""
+        try:
+            response = ""
+            # 如果是基础命令，等待小爱音箱处理
+            if plan.analysis.is_basic_command:
+                # 等待小爱音箱处理
+                await self.migpt.wait_for_tts_finish()
+                time.sleep(2)
+                return 
+
+            # 如果需要设备控制
+            elif plan.analysis.requires_device_control:
+                device_actions = await self.analyze_device_actions(plan.user_input)
+                if device_actions:
+                    device_response = await self.execute_device_actions(device_actions)
+                    response = f"{plan.response_text}\n{device_response}"
             
-        device = action["device"]
-        command = action["command"]
-        params = action.get("params", {})
-        
-        # 构建命令字符串
-        cmd_str = self._build_command(device, command, params)
-        
-        # 发送命令
-        await self.migpt.miio_service.send_command(
-            self.migpt.config.mi_did,
-            f"5-4 {cmd_str} #1"
-        )
-        
-    def _build_command(self, device: str, command: str, params: Dict) -> str:
-        """构建设备控制命令"""
-        # 基础命令
-        cmd = f"{device}_{command}"
-        
-        # 添加参数
-        if params:
-            param_str = "_".join(f"{k}_{v}" for k, v in params.items())
-            cmd = f"{cmd}_{param_str}"
+            # 如果需要信息查询
+            elif plan.analysis.requires_info_query:
+                query_response = await self.execute_info_query(
+                    plan.analysis.search_query
+                )
+                response = f"{plan.response_text}\n{query_response}"
             
-        return cmd
+            # 普通对话直接返回计划中的响应
+            else:
+                response = plan.response_text
+            
+            # 处理响应 先停掉小爱音箱
+            await self.migpt.stop_if_xiaoai_is_playing()
+            if isinstance(response, str):
+                # 如果是字符串，转换为异步生成器
+                async def response_generator():
+                    yield response
+                await self.migpt.speak(response_generator())
+            else:
+                # 如果已经是流，直接传递
+                await self.migpt.speak(response)
+
+            # 如果在对话模式，准备下一轮对话
+            if self.migpt.in_conversation:
+                await self.migpt.wakeup_xiaoai()
+            return 
+            
+        except Exception as e:
+            self.logger.error(f"执行计划失败: {str(e)}")
+            return 
+        
+
+            
+    async def close(self):
+        """关闭执行器"""
+        # TODO: 清理资源
+        pass

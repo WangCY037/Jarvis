@@ -11,7 +11,7 @@ from xiaogpt.bot.moonshot_bot import MoonshotBot
 from xiaogpt.bot.qwen_bot import QwenBot
 from xiaogpt.bot.yi_bot import YiBot
 from xiaogpt.bot.siliconflow_bot import SiliconFlowBot
-from xiaogpt.config import Config
+from jarvis.configs.Config import Config
 
 BOTS: dict[str, type[BaseBot]] = {
     "chatgptapi": ChatGPTBot,

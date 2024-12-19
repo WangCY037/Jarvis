@@ -32,10 +32,9 @@ EOF = object()
 
 
 class MiGPT:
-    def __init__(self, config: Config, client_session: Optional[ClientSession] = None, bot = None, search_bot = None):
+    def __init__(self, config: Config, client_session: Optional[ClientSession] = None, bot = None):
         self.config = config
         self.bot = bot or get_bot(self.config)  # 使用传入的bot或创建新的
-        self.search_bot = search_bot
 
         self.mi_token_home = Path.home() / ".mi.token"
         self.last_timestamp = int(time.time() * 1000)  # timestamp last call mi speaker
@@ -49,9 +48,8 @@ class MiGPT:
         self.last_record = asyncio.Queue(1)
         # setup logger
         self.log = logging.getLogger("xiaogpt")
-        handler = RichHandler(level=logging.DEBUG if config.verbose else logging.INFO)
-        self.log.addHandler(handler)
         self.log.setLevel(logging.DEBUG if config.verbose else logging.INFO)
+        self.log.addHandler(RichHandler())
         self.log.debug(config)
         # 使用传入的 session 或创建新的
         self.mi_session = client_session or ClientSession()
@@ -287,7 +285,7 @@ class MiGPT:
         while True:
             if not await self.get_if_xiaoai_is_playing():
                 break
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
 
     @staticmethod
     def _normalize(message: str) -> str:
@@ -297,24 +295,19 @@ class MiGPT:
         message = message.replace("*", "")
         return message
 
-    async def ask_gpt(self, query: str, **kwargs) -> AsyncIterator[str]:
-        """
-        向GPT发送查询并获取响应
-        
-        Args:
-            query: 查询文本
-            **kwargs: 其他选项，包括message_type和additional_messages等
-        """
-        options = {**self.config.gpt_options, **kwargs}
-        bot = self.bot if kwargs.get("message_type", "") != MessageType.SEARCH_INFO else self.search_bot
+    async def ask_gpt(self, query: str, message_type: MessageType) -> AsyncIterator[str]:
+        options = {**self.config.gpt_options, "message_type": message_type}
         if not self.config.stream:
-            answer = await bot.ask(query, **options)
+            if self.config.bot == "glm":
+                answer = self.bot.ask(query, **options)
+            else:
+                answer = await self.bot.ask(query, **options)
             message = self._normalize(answer) if answer else ""
             yield message
             return
 
         async def collect_stream(queue):
-            async for message in bot.ask_stream(
+            async for message in self.bot.ask_stream(
                 query, **options
             ):
                 await queue.put(message)

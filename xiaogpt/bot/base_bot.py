@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator, TypeVar
 
-from xiaogpt.config import Config
+from jarvis.configs.Config import Config
 
 T = TypeVar("T", bound="BaseBot")
 
